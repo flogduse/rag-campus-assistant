@@ -1,0 +1,30 @@
+HOSTEL HANDBOOK — KEY RULES 2026
+=================================
+
+MESS TIMINGS
+Breakfast: 7:30 AM to 9:00 AM. Lunch: 12:30 PM to 2:00 PM. Snacks: 5:00 PM to 6:00 PM.
+Dinner: 7:30 PM to 9:00 PM. The mess closes punctually; late plates are not served.
+
+VISITOR POLICY
+Parents and guardians may visit on Sundays between 10:00 AM and 5:00 PM only.
+All visitors must sign the register at the warden's office. Friends who are not
+guardians are not permitted inside the residential blocks.
+
+LEAVE RULES
+Overnight leave requires a parent's written consent emailed to the warden at least
+48 hours in advance. Leave during examination weeks is sanctioned only by the
+Chief Warden. Students returning after 9:00 PM must sign the late register.
+
+WiFi AND NETWORK
+Hostel bandwidth is 100 Mbps shared. Streaming and torrent traffic is throttled
+between 7:00 PM and 11:00 PM. Port 25 (SMTP) is blocked to prevent spam; use the
+webmail interface instead.
+
+COMPLAINTS AND MAINTENANCE
+Plumbing and electrical complaints go to the maintenance portal; the SLA is 72 hours.
+The mess committee meets on the first Saturday of every month — students may submit
+menu suggestions a day earlier in the suggestion box.
+
+FINE STRUCTURE
+Late entry after 11:00 PM: Rs. 100. Unauthorized overnight absence: Rs. 500 and a
+written explanation. Damage to hostel property is charged at repair cost plus 20 percent.

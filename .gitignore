@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Data artifacts (vector store is rebuildable from data/docs)
+data/chroma/
+
+# Secrets
+.env
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Runtime logs
+*.log
+*.log.err

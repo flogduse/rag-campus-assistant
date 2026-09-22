@@ -1,0 +1,30 @@
+STUDENT CLUBS AND ANNUAL TECH FEST
+===================================
+
+TECH FEST — "PRAVYOM 2027"
+The annual national-level tech fest runs for three days in the third week of January
+(estimated Jan 15-17, 2027). Events include a 24-hour hackathon with a Rs. 50,000 prize
+pool, robotics arena, line-follower race, UI/UX sprint, and a startup pitch with incubation
+offers. Registration opens in December through the student portal; team size is 2-4 members.
+
+MAJOR CLUBS
+Robotics Club — meets Wednesdays 4:30 PM, ECE block lab 2. Builds line followers, drones
+and sumo bots. Faculty advisor: Dr. Menon.
+
+Coding Club — meets Fridays 5:00 PM, CS block seminar hall. Weekly contests, ICPC
+preparation, and a peer-mentored DSA track for first-years.
+
+AI/ML Society — meets Saturdays 10:00 AM. Current projects: a campus RAG assistant,
+a sign-language translator, and a gesture-control interface. Open to all branches;
+basic Python required.
+
+Electronics Hobby Club — open lab every Saturday 2:00 PM. Soldering stations and
+oscilloscopes available after a safety induction.
+
+STARTUP AND E-CELL
+The Entrepreneurship Cell runs a monthly "Idea Friday" and connects student teams to
+the incubation center. Seed grants of up to Rs. 25,000 are available twice a year.
+
+HOW TO JOIN
+Club recruitment drives happen in the second week of each odd semester. Sign-ups are
+on the student activities portal; most clubs take a short interaction rather than a test.

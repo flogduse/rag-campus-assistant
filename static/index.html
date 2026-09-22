@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Campus Assistant — RAG</title>
+  <meta name="description" content="RAG chatbot over campus documents. Ask about syllabus, deadlines, clubs." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <span class="logo">CA<span class="dot">.</span></span>
+    <span class="title">CAMPUS ASSISTANT ///</span>
+    <span id="provider-pill" class="pill">CHECKING…</span>
+  </header>
+
+  <main id="log" class="log">
+    <div class="empty" id="empty">
+      <h1>ASK YOUR<br/>CAMPUS<span class="dot">.</span></h1>
+      <p>Answers come strictly from the ingested documents, with citations.</p>
+      <div class="examples" id="examples"></div>
+    </div>
+  </main>
+
+  <form id="composer" class="composer">
+    <input id="q" type="text" autocomplete="off" maxlength="2000"
+           placeholder="e.g. When is the mid-semester break?" />
+    <button type="submit" class="ask">ASK ↗</button>
+  </form>
+
+  <script src="app.js"></script>
+</body>
+</html>
