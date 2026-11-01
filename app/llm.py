@@ -22,11 +22,23 @@ def _context_block(text: str, index: int, meta: dict) -> str:
     return f"[{index}] ({src}{page_s})\n{text}"
 
 
-def build_prompt(question: str, hits: list[dict]) -> str:
+def build_prompt(question: str, hits: list[dict], history: list[dict] | None = None) -> str:
     blocks = "\n\n".join(
         _context_block(h["text"], i + 1, h["metadata"]) for i, h in enumerate(hits)
     )
+    history_text = ""
+    if history:
+        parts = []
+        for turn in history[-6:]:  # keep last few turns
+            role = turn.get("role", "user")
+            content = turn.get("content", "").strip()
+            if not content:
+                continue
+            parts.append(f"{role.upper()}: {content}")
+        if parts:
+            history_text = "Conversation history:\n" + "\n".join(parts) + "\n\n---\n\n"
     return (
+        f"{history_text}"
         f"Context:\n{blocks}\n\n---\n\n"
         f"Question: {question}\n\n"
         "Answer using only the context above. Cite sources as [1], [2]. "
@@ -40,6 +52,7 @@ def retrieve(question: str) -> list[dict]:
     MMR (maximal marginal relevance) keeps results relevant *and* diverse:
     score = query similarity - lambda * redundancy with already-picked chunks.
     Redundancy uses a cheap Jaccard overlap on word sets — no re-encoding.
+    Drop hits below MIN_SCORE to avoid feeding irrelevant context.
     """
     from .ingest import get_model
 
@@ -76,17 +89,26 @@ def retrieve(question: str) -> list[dict]:
         selected.append(best_i)
 
     hits = []
-    for rank, i in enumerate(selected[: config.TOP_K], start=1):
+    for rank, i in enumerate(selected, start=1):
+        sim = round(1 - dists[i], 4)
+        if sim < config.MIN_SCORE:
+            continue  # drop irrelevant chunks
         hits.append({
-            "index": rank,
+            "index": len(hits) + 1,
             "text": docs[i],
             "metadata": metas[i],
-            "score": round(1 - dists[i], 4),
+            "score": sim,
         })
+        if len(hits) >= config.TOP_K:
+            break
     return hits
 
 
 def _sse_stream(resp: requests.Response) -> Iterator[str]:
+    # Force UTF-8. requests falls back to ISO-8859-1 when an SSE response has no
+    # charset parameter, which turns multi-byte characters into mojibake
+    # (a narrow no-break space renders as "a€¯").
+    resp.encoding = "utf-8"
     for line in resp.iter_lines(decode_unicode=True):
         if not line or not line.startswith("data:"):
             continue
@@ -158,6 +180,7 @@ def stream_ollama(prompt: str) -> Iterator[str]:
         timeout=180,
     )
     r.raise_for_status()
+    r.encoding = "utf-8"  # same ISO-8859-1 default applies to NDJSON
     for line in r.iter_lines(decode_unicode=True):
         if not line:
             continue

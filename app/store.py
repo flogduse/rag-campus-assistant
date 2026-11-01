@@ -54,7 +54,10 @@ def add_chunks(chunks: list[dict], vectors: list[list[float]]) -> int:
     col = get_collection()
     if not chunks:
         return 0
-    col.add(
+    # upsert, not add: re-running ingest must refresh chunks whose text changed.
+    # Chroma's add() silently ignores ids that already exist, which leaves stale
+    # content in the store after an edit to the source document.
+    col.upsert(
         ids=[c["id"] for c in chunks],
         documents=[c["text"] for c in chunks],
         metadatas=[_clean_meta(c["metadata"]) for c in chunks],
@@ -72,10 +75,16 @@ def query(text: str, vector: list[float], k: int) -> dict:
     )
 
 
+import logging
+
+logger = logging.getLogger("rag-campus-assistant")
+
+
 def count() -> int:
     try:
         return get_collection().count()
     except Exception:
+        logger.exception("Failed to count documents in store")
         return 0
 
 
@@ -87,7 +96,8 @@ def reset() -> None:
         if got and got.get("ids"):
             col.delete(ids=got["ids"])
     except Exception:
-        pass
+        logger.exception("Failed to reset vector store")
+        raise
 
 
 def unique_docs() -> int:
@@ -96,6 +106,7 @@ def unique_docs() -> int:
         if col.count() == 0:
             return 0
         got = col.get(include=["metadatas"])
-        return len({m.get("source", "?") for m in got["metadatas"]})
+        return len({(m.get("source") if m else "?") or "?" for m in got.get("metadatas", [])})
     except Exception:
+        logger.exception("Failed to get unique docs count")
         return 0

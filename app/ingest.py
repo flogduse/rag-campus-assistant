@@ -94,7 +94,16 @@ def chunk_text(text: str, size: int, overlap: int) -> list[str]:
             chunks.append(piece)
         if end >= len(text):
             break
-        start = max(0, end - overlap)
+        # Snap the chunk start forward to a word boundary. `end` was already
+        # pulled back to a space, but `end - overlap` can land mid-word (e.g. a
+        # chunk beginning "ORK" from "NETWORK").
+        new_start = max(0, end - overlap)
+        if 0 < new_start < len(text):
+            nsp = text.find(" ", new_start)
+            if nsp != -1 and nsp + 1 < end:
+                new_start = nsp + 1
+        # Never move backwards: guarantees termination if the snap overshoots.
+        start = new_start if new_start > start else end
     return chunks
 
 

@@ -24,6 +24,7 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))  # characters
 # --- Retrieval ---
 TOP_K = int(os.getenv("TOP_K", "4"))           # chunks fetched per query
 FETCH_K = int(os.getenv("FETCH_K", "12"))      # candidates before MMR
+MIN_SCORE = float(os.getenv("MIN_SCORE", "0.35"))  # drop hits below this similarity score
 
 # --- Embeddings (local by default — no API key, no cost) ---
 EMBED_MODEL = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
@@ -41,6 +42,9 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 LLM_TEMP = float(os.getenv("LLM_TEMP", "0.2"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "700"))
 
+# --- Security ---
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+
 SYSTEM_PROMPT = (
     "You are the Campus Assistant for Adithya's college. Answer strictly from "
     "the provided context. If the context does not contain the answer, say "
@@ -50,21 +54,43 @@ SYSTEM_PROMPT = (
 )
 
 
-@lru_cache
+_provider_cache = {"ts": 0, "value": None}
+_CACHE_TTL = 30  # seconds
+
+
 def get_provider() -> tuple[str, str | None]:
     """Return (provider_name, model) for the best available LLM.
 
     Order: Groq cloud (free tier) -> OpenAI -> local Ollama.
+    Cached briefly to avoid blocking on Ollama probe repeatedly.
     """
+    import time
+
+    now = time.time()
+    if _provider_cache["value"] is not None and now - _provider_cache["ts"] < _CACHE_TTL:
+        return _provider_cache["value"]
+
     if GROQ_API_KEY:
-        return "groq", GROQ_MODEL
+        val = ("groq", GROQ_MODEL)
+        _provider_cache["ts"] = now
+        _provider_cache["value"] = val
+        return val
     if OPENAI_API_KEY:
-        return "openai", OPENAI_MODEL
+        val = ("openai", OPENAI_MODEL)
+        _provider_cache["ts"] = now
+        _provider_cache["value"] = val
+        return val
     try:
         import requests
         r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=2)
         if r.status_code == 200:
-            return "ollama", OLLAMA_MODEL
+            val = ("ollama", OLLAMA_MODEL)
+            _provider_cache["ts"] = now
+            _provider_cache["value"] = val
+            return val
     except Exception:
         pass
-    return "none", None
+    val = ("none", None)
+    _provider_cache["ts"] = now
+    _provider_cache["value"] = val
+    return val

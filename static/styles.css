@@ -98,6 +98,18 @@ body {
   cursor: pointer;
   transition: transform 0.15s ease;
 }
+.sources .src.active { background: var(--blue); }
+.sources .src-detail {
+  display: none;
+  width: 100%;
+  font: 400 12px/1.6 'DM Mono';
+  white-space: pre-wrap;
+  background: var(--card);
+  border: var(--border-thin);
+  padding: 10px 12px;
+  box-shadow: var(--shadow);
+}
+.sources .src-detail.open { display: block; }
 .sources .src:hover { transform: translate(-1px, -1px); }
 .sources .src.active { background: var(--blue); }
 

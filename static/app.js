@@ -1,4 +1,4 @@
-/* Campus Assistant frontend: SSE chat with sources + citations. */
+/* Campus Assistant frontend: SSE chat with sources + citations + memory + stop. */
 const log = document.getElementById('log');
 const empty = document.getElementById('empty');
 const form = document.getElementById('composer');
@@ -12,6 +12,9 @@ const EXAMPLES = [
   'Which club handles the tech fest?',
   'What does the attendance policy say?',
 ];
+
+const history = [];
+let controller = null;
 
 function initExamples() {
   const wrap = document.getElementById('examples');
@@ -50,14 +53,28 @@ function renderSources(container, sources) {
     const chip = document.createElement('button');
     chip.type = 'button';
     chip.className = 'src';
+    chip.dataset.idx = i + 1;
     chip.textContent = `[${i + 1}] ${s.source}${s.page ? ` p.${s.page}` : ''}`;
-    chip.title = s.text;
-    chip.addEventListener('click', () => {
-      box.querySelectorAll('.src').forEach((el) => el.classList.remove('active'));
-      chip.classList.add('active');
-      chip.title = `${s.text}\n\n(score: ${s.score})`;
+    const detail = document.createElement('div');
+    detail.className = 'src-detail';
+    detail.textContent = s.text + `\n\n(score: ${s.score})`;
+    chip.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // toggle detail panel for mobile/touch
+      const open = chip.classList.contains('active');
+      box.querySelectorAll('.src').forEach((el) => {
+        el.classList.remove('active');
+      });
+      box.querySelectorAll('.src-detail').forEach((el) => {
+        el.classList.remove('open');
+      });
+      if (!open) {
+        chip.classList.add('active');
+        detail.classList.add('open');
+      }
     });
     box.appendChild(chip);
+    box.appendChild(detail);
   });
   container.appendChild(box);
   scrollBottom();
@@ -70,21 +87,44 @@ function setPill(provider, model) {
   pill.className = `pill ${provider}`;
 }
 
+function makeStopButton() {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ask';
+  btn.textContent = 'STOP ■';
+  btn.addEventListener('click', () => {
+    if (controller) {
+      controller.abort();
+    }
+  });
+  return btn;
+}
+
 async function ask(question) {
   if (!question.trim()) return;
+  if (controller) {
+    controller.abort();
+  }
   if (!empty.hidden) empty.hidden = true;
 
-  addMessage('user', question);
+  const userMsg = question;
+  addMessage('user', userMsg);
   const bubble = addMessage('bot');
   askBtn.disabled = true;
   input.value = '';
   input.focus();
 
+  // swap button to stop
+  const stopBtn = makeStopButton();
+  form.replaceChild(stopBtn, askBtn);
+
+  controller = new AbortController();
   try {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question }),
+      body: JSON.stringify({ question: userMsg, history }),
+      signal: controller.signal,
     });
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
@@ -117,11 +157,20 @@ async function ask(question) {
         }
       }
     }
+    history.push({ role: 'user', content: userMsg });
+    history.push({ role: 'assistant', content: bubble.textContent });
+    if (history.length > 12) history.splice(0, history.length - 12);
   } catch (err) {
-    bubble.textContent += `\n[connection error: ${err.message}]`;
+    if (err.name === 'AbortError') {
+      bubble.textContent += '\n[stopped]';
+    } else {
+      bubble.textContent += `\n[connection error: ${err.message}]`;
+    }
   } finally {
     bubble.classList.remove('typing');
+    form.replaceChild(askBtn, stopBtn);
     askBtn.disabled = false;
+    controller = null;
   }
 }
 

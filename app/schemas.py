@@ -13,8 +13,14 @@ class Source(BaseModel):
     text: str = Field(..., description="The chunk text (truncated in UI)")
 
 
+class ChatHistoryTurn(BaseModel):
+    role: str = Field(..., pattern="^(user|assistant)$")
+    content: str = Field(..., min_length=1, max_length=2000)
+
+
 class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
+    history: list[ChatHistoryTurn] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
