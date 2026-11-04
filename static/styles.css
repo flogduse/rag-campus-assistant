@@ -100,6 +100,18 @@ body {
 }
 .sources .src:hover { transform: translate(-1px, -1px); }
 .sources .src.active { background: var(--blue); }
+/* Full chunk text under the chips — works on touch, unlike a title tooltip. */
+.src-detail {
+  border: var(--border-thin);
+  background: var(--card);
+  padding: 10px 12px;
+  margin-top: 8px;
+  font: 400 11px 'DM Mono';
+  line-height: 1.6;
+  white-space: pre-wrap;
+  max-height: 220px;
+  overflow-y: auto;
+}
 
 .typing::after {
   content: '▋';
@@ -139,6 +151,18 @@ body {
 .composer .ask:hover { transform: translate(-2px, -2px); box-shadow: 8px 8px 0 var(--ink); }
 .composer .ask:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
 .composer .ask:disabled { opacity: 0.5; cursor: not-allowed; }
+.composer .stop {
+  border: var(--border);
+  background: var(--paper);
+  color: var(--red);
+  font: 700 14px 'Space Grotesk';
+  letter-spacing: 1px;
+  padding: 0 20px;
+  cursor: pointer;
+  box-shadow: 4px 4px 0 var(--ink);
+}
+.composer .stop:hover { transform: translate(-2px, -2px); box-shadow: 6px 6px 0 var(--ink); }
+.composer .stop:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
 
 @media (max-width: 600px) {
   .title { display: none; }

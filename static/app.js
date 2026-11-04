@@ -4,6 +4,7 @@ const empty = document.getElementById('empty');
 const form = document.getElementById('composer');
 const input = document.getElementById('q');
 const askBtn = form.querySelector('.ask');
+const stopBtn = document.getElementById('stop');
 const pill = document.getElementById('provider-pill');
 
 const EXAMPLES = [
@@ -12,6 +13,13 @@ const EXAMPLES = [
   'Which club handles the tech fest?',
   'What does the attendance policy say?',
 ];
+
+// Prior turns, sent with each question so follow-ups like "when is it?" work.
+// Trimmed on the server too (HISTORY_TURNS); this cap just keeps payloads small.
+const MAX_HISTORY = 6;
+const history = [];
+
+let activeController = null;
 
 function initExamples() {
   const wrap = document.getElementById('examples');
@@ -43,23 +51,35 @@ function addMessage(role, text = '') {
   return bubble;
 }
 
-function renderSources(container, sources) {
+function renderSources(wrap, sources) {
   const box = document.createElement('div');
   box.className = 'sources';
+  const detail = document.createElement('div');
+  detail.className = 'src-detail';
+  detail.hidden = true;
+
   sources.forEach((s, i) => {
     const chip = document.createElement('button');
     chip.type = 'button';
     chip.className = 'src';
     chip.textContent = `[${i + 1}] ${s.source}${s.page ? ` p.${s.page}` : ''}`;
-    chip.title = s.text;
     chip.addEventListener('click', () => {
+      const wasActive = chip.classList.contains('active');
       box.querySelectorAll('.src').forEach((el) => el.classList.remove('active'));
+      if (wasActive) {
+        detail.hidden = true;
+        return;
+      }
       chip.classList.add('active');
-      chip.title = `${s.text}\n\n(score: ${s.score})`;
+      const where = `${s.source}${s.page ? ` · page ${s.page}` : ''}`;
+      detail.textContent = `${where} · score ${s.score}\n\n${s.text}`;
+      detail.hidden = false;
+      scrollBottom();
     });
     box.appendChild(chip);
   });
-  container.appendChild(box);
+
+  wrap.append(box, detail);
   scrollBottom();
 }
 
@@ -70,28 +90,41 @@ function setPill(provider, model) {
   pill.className = `pill ${provider}`;
 }
 
+function setStreaming(on) {
+  askBtn.disabled = on;
+  stopBtn.hidden = !on;
+  if (!on) activeController = null;
+}
+
 async function ask(question) {
   if (!question.trim()) return;
   if (!empty.hidden) empty.hidden = true;
 
-  addMessage('user', question);
+  const prompt = question.trim();
+  addMessage('user', prompt);
   const bubble = addMessage('bot');
-  askBtn.disabled = true;
   input.value = '';
   input.focus();
+
+  const controller = new AbortController();
+  activeController = controller;
+  setStreaming(true);
+
+  const payload = { question: prompt, history: history.slice(-MAX_HISTORY) };
+  let stopped = false;
 
   try {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question }),
+      body: JSON.stringify(payload),
+      signal: controller.signal,
     });
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = '';
-    let sourcesBox = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -118,16 +151,34 @@ async function ask(question) {
       }
     }
   } catch (err) {
-    bubble.textContent += `\n[connection error: ${err.message}]`;
+    if (err.name === 'AbortError') {
+      stopped = true;
+      bubble.textContent += bubble.textContent ? '\n\n[stopped]' : '[stopped]';
+    } else {
+      bubble.textContent += `\n[connection error: ${err.message}]`;
+    }
   } finally {
     bubble.classList.remove('typing');
-    askBtn.disabled = false;
+    setStreaming(false);
+  }
+
+  // Remember the exchange so the next question has context.
+  const answer = bubble.textContent.trim();
+  if (answer && !stopped) {
+    history.push({ role: 'user', content: prompt });
+    history.push({ role: 'assistant', content: answer.slice(0, 4000) });
+    while (history.length > MAX_HISTORY) history.shift();
   }
 }
 
 form.addEventListener('submit', (e) => {
   e.preventDefault();
+  if (activeController) return; // one question at a time
   ask(input.value);
+});
+
+stopBtn.addEventListener('click', () => {
+  if (activeController) activeController.abort();
 });
 
 (async () => {

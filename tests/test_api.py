@@ -12,7 +12,8 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import llm  # noqa: E402
+from app import config, llm  # noqa: E402
+from app import main as main_module  # noqa: E402
 from app.main import app  # noqa: E402
 
 client = TestClient(app)
@@ -33,9 +34,17 @@ FAKE_HITS = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def clear_rate_buckets():
+    """Isolate the in-process rate limiter between tests."""
+    main_module._rate_buckets.clear()
+    yield
+    main_module._rate_buckets.clear()
+
+
 @pytest.fixture()
 def fake_retrieval(monkeypatch):
-    monkeypatch.setattr(llm, "retrieve", lambda q: FAKE_HITS)
+    monkeypatch.setattr(llm, "retrieve", lambda q, history=None: FAKE_HITS)
     monkeypatch.setattr(
         "app.main.llm", llm
     )  # main.py imported the module object; patch its attribute
@@ -45,7 +54,7 @@ def fake_retrieval(monkeypatch):
 class TestChatEndpoint:
     def test_sse_stream_shape(self, fake_retrieval, monkeypatch):
         monkeypatch.setattr(
-            llm, "stream_answer", lambda q, hits: iter(["The break is Sep 24 [1]."])
+            llm, "stream_answer", lambda q, hits, history=None: iter(["The break is Sep 24 [1]."])
         )
         with client.stream("POST", "/api/chat", json={"question": "when is the break?"}) as r:
             assert r.status_code == 200
@@ -62,15 +71,24 @@ class TestChatEndpoint:
         assert "Sep 24" in tokens
 
     def test_sources_event_carries_scores_and_pages(self, fake_retrieval, monkeypatch):
-        monkeypatch.setattr(llm, "stream_answer", lambda q, hits: iter(["ok"]))
+        monkeypatch.setattr(llm, "stream_answer", lambda q, hits, history=None: iter(["ok"]))
         with client.stream("POST", "/api/chat", json={"question": "marks split"}) as r:
             lines = [l for l in r.iter_lines() if l.startswith("data:")]
         sources = json.loads(lines[0][5:])["sources"]
         assert sources[1]["page"] == 2
         assert sources[0]["score"] == 0.83
 
+    def test_empty_page_is_sent_as_null(self, fake_retrieval, monkeypatch):
+        """Chroma stores unknown pages as ""; the API contract says int | None."""
+        hits = [{**FAKE_HITS[0], "metadata": {**FAKE_HITS[0]["metadata"], "page": ""}}]
+        monkeypatch.setattr(llm, "retrieve", lambda q, history=None: hits)
+        monkeypatch.setattr(llm, "stream_answer", lambda q, hits, history=None: iter(["ok"]))
+        with client.stream("POST", "/api/chat", json={"question": "hi"}) as r:
+            lines = [l for l in r.iter_lines() if l.startswith("data:")]
+        assert json.loads(lines[0][5:])["sources"][0]["page"] is None
+
     def test_empty_retrieval_returns_guidance(self, fake_retrieval, monkeypatch):
-        monkeypatch.setattr(llm, "retrieve", lambda q: [])
+        monkeypatch.setattr(llm, "retrieve", lambda q, history=None: [])
         with client.stream("POST", "/api/chat", json={"question": "zzz irrelevant"}) as r:
             lines = [l for l in r.iter_lines() if l.startswith("data:")]
         frames = [json.loads(l[5:]) for l in lines]
@@ -81,8 +99,38 @@ class TestChatEndpoint:
         r = client.post("/api/chat", json={"question": ""})
         assert r.status_code == 422  # min_length=1
 
+    def test_blank_question_rejected(self):
+        r = client.post("/api/chat", json={"question": "   "})
+        assert r.status_code == 422
+
+    def test_history_is_forwarded_to_retrieval_and_prompt(self, monkeypatch):
+        seen = {}
+
+        def fake_retrieve(question, history=None):
+            seen["retrieve"] = (question, history)
+            return FAKE_HITS
+
+        def fake_stream(question, hits, history=None):
+            seen["stream"] = history
+            return iter(["ok"])
+
+        monkeypatch.setattr(llm, "retrieve", fake_retrieve)
+        monkeypatch.setattr(llm, "stream_answer", fake_stream)
+        payload = {
+            "question": "and when does it end?",
+            "history": [
+                {"role": "user", "content": "When is the mid-semester break?"},
+                {"role": "assistant", "content": "It starts Sep 24 [1]."},
+            ],
+        }
+        with client.stream("POST", "/api/chat", json=payload) as r:
+            list(r.iter_lines())
+
+        assert seen["retrieve"][1][0]["content"] == "When is the mid-semester break?"
+        assert seen["stream"][1]["role"] == "assistant"
+
     def test_llm_error_becomes_stream_message(self, fake_retrieval, monkeypatch):
-        def boom(q, hits):
+        def boom(q, hits, history=None):
             raise RuntimeError("provider down")
             yield  # pragma: no cover
 
@@ -93,6 +141,115 @@ class TestChatEndpoint:
         tokens = "".join(f.get("t", "") for f in frames if f["type"] == "token")
         assert "provider down" in tokens
         assert frames[-1] == {"type": "done"}  # stream still terminates cleanly
+
+
+class TestRateLimit:
+    def test_limit_returns_429_with_retry_after(self, fake_retrieval, monkeypatch):
+        monkeypatch.setattr(config, "RATE_LIMIT", 2)
+        monkeypatch.setattr(config, "RATE_WINDOW", 60)
+        monkeypatch.setattr(llm, "stream_answer", lambda q, hits, history=None: iter(["ok"]))
+
+        for _ in range(2):
+            with client.stream("POST", "/api/chat", json={"question": "hi"}) as r:
+                list(r.iter_lines())
+            assert r.status_code == 200
+
+        r = client.post("/api/chat", json={"question": "hi"})
+        assert r.status_code == 429
+        assert int(r.headers["retry-after"]) >= 1
+
+
+class TestIngestProtection:
+    def test_open_when_no_admin_token_configured(self, monkeypatch):
+        monkeypatch.setattr(config, "ADMIN_TOKEN", "")
+        monkeypatch.setattr(main_module.store, "reset", lambda: None)
+        monkeypatch.setattr(main_module.ingest, "ingest_all", lambda: 3)
+        monkeypatch.setattr(main_module.store, "count", lambda: 3)
+        r = client.post("/api/ingest")
+        assert r.status_code == 200
+        assert r.json()["chunks"] == 3
+
+    def test_rejects_missing_or_wrong_token(self, monkeypatch):
+        monkeypatch.setattr(config, "ADMIN_TOKEN", "s3cret")
+        assert client.post("/api/ingest").status_code == 401
+        assert client.post("/api/ingest", headers={"X-Admin-Token": "nope"}).status_code == 401
+
+    def test_accepts_matching_token(self, monkeypatch):
+        monkeypatch.setattr(config, "ADMIN_TOKEN", "s3cret")
+        monkeypatch.setattr(main_module.store, "reset", lambda: None)
+        monkeypatch.setattr(main_module.ingest, "ingest_all", lambda: 2)
+        monkeypatch.setattr(main_module.store, "count", lambda: 2)
+        r = client.post("/api/ingest", headers={"X-Admin-Token": "s3cret"})
+        assert r.status_code == 200
+
+
+class _FakeModel:
+    """Stand-in for SentenceTransformer so retrieval tests never load torch."""
+
+    def encode(self, texts, normalize_embeddings=True, **kwargs):
+        return [_FakeVector()]
+
+
+class _FakeVector(list):
+    def __init__(self):
+        super().__init__([0.1, 0.2, 0.3])
+
+    def tolist(self):
+        return list(self)
+
+
+class TestRetrievalThreshold:
+    def _stub(self, monkeypatch, distances):
+        monkeypatch.setattr("app.ingest.get_model", lambda: _FakeModel())
+        monkeypatch.setattr(
+            llm.store,
+            "query",
+            lambda text, vector, k: {
+                "documents": [[f"chunk {i}" for i in range(len(distances))]],
+                "metadatas": [[{"source": "doc.txt", "page": 1, "chunk_index": i} for i in range(len(distances))]],
+                "distances": [distances],
+            },
+        )
+
+    def test_drops_hits_below_min_score(self, monkeypatch):
+        self._stub(monkeypatch, distances=[0.2, 0.55, 0.7])  # scores .8, .45, .3
+        monkeypatch.setattr(config, "MIN_SCORE", 0.4)
+        hits = llm.retrieve("question")
+        assert [h["text"] for h in hits] == ["chunk 0", "chunk 1"]
+
+    def test_returns_nothing_when_all_irrelevant(self, monkeypatch):
+        self._stub(monkeypatch, distances=[0.85, 0.9])
+        monkeypatch.setattr(config, "MIN_SCORE", 0.4)
+        assert llm.retrieve("totally off-topic") == []
+
+    def test_citations_are_renumbered_after_filtering(self, monkeypatch):
+        self._stub(monkeypatch, distances=[0.8, 0.2])  # first is dropped
+        monkeypatch.setattr(config, "MIN_SCORE", 0.4)
+        hits = llm.retrieve("question")
+        assert [h["index"] for h in hits] == [1]
+        assert hits[0]["text"] == "chunk 1"
+
+
+class TestFollowUpQuery:
+    def test_pronoun_follow_up_inherits_previous_question(self):
+        history = [{"role": "user", "content": "When is the mid-semester break?"}]
+        assert llm.retrieval_query("and when does it end?", history).startswith(
+            "When is the mid-semester break?"
+        )
+
+    def test_standalone_question_is_unchanged(self):
+        history = [{"role": "user", "content": "When is the mid-semester break?"}]
+        q = "What are the hostel mess timings for dinner"
+        assert llm.retrieval_query(q, history) == q
+
+    def test_no_history_returns_question(self):
+        assert llm.retrieval_query("hello", None) == "hello"
+
+    def test_prompt_includes_earlier_turns(self):
+        history = [{"role": "user", "content": "When is the break?"}]
+        prompt = llm.build_prompt("and when does it end?", FAKE_HITS, history)
+        assert "When is the break?" in prompt
+        assert "Context:" in prompt
 
 
 class TestHealth:
