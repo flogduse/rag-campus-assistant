@@ -44,8 +44,8 @@ def main() -> int:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.8,
-        help="minimum source hit-rate to exit 0 (default: 0.8)",
+        default=0.9,
+        help="minimum source and keyword rate to exit 0 (default: 0.9)",
     )
     parser.add_argument("--verbose", action="store_true", help="print every hit")
     args = parser.parse_args()
@@ -56,8 +56,9 @@ def main() -> int:
 
     cases = load_cases(args.golden)
     print(
-        f"Retrieval evaluation · {len(cases)} cases · "
-        f"TOP_K={config.TOP_K} MIN_SCORE={config.MIN_SCORE} · "
+        f"Retrieval evaluation | {len(cases)} cases | "
+        f"TOP_K={config.TOP_K} MIN_SCORE={config.MIN_SCORE} "
+        f"LEXICAL_WEIGHT={config.LEXICAL_WEIGHT} | "
         f"{store.count()} chunks\n"
     )
 
@@ -78,12 +79,12 @@ def main() -> int:
         source_hits += source_ok
         keyword_hits += keyword_ok
 
-        mark = "✔" if source_ok and keyword_ok else "✘"
+        mark = "PASS" if source_ok and keyword_ok else "FAIL"
         top = f"{hits[0]['score']:.2f}" if hits else "—"
         print(
             f" {mark} {i:2}. {question[:58]:<58} "
-            f"source={'✓' if source_ok else '✗'} "
-            f"keyword={'✓' if keyword_ok else '✗'} "
+            f"source={'ok' if source_ok else 'MISS'} "
+            f"keyword={'ok' if keyword_ok else 'MISS'} "
             f"top={top} hits={len(hits)}"
         )
         if args.verbose:
@@ -104,7 +105,7 @@ def main() -> int:
         f"Threshold       : {args.threshold:.0%}"
     )
 
-    if source_rate < args.threshold:
+    if min(source_rate, keyword_rate) < args.threshold:
         print("\nFAIL — below threshold. Lower MIN_SCORE, raise FETCH_K, or add/chunk documents better.")
         return 1
     print("\nPASS")

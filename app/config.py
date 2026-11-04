@@ -24,9 +24,13 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))  # characters
 # --- Retrieval ---
 TOP_K = int(os.getenv("TOP_K", "4"))           # chunks fetched per query
 FETCH_K = int(os.getenv("FETCH_K", "12"))      # candidates before MMR
-# 0.20 measured on data/eval/golden.json: on-topic top hits scored 0.24-0.68,
-# off-topic ones 0.06-0.20. Re-tune with `python scripts/eval_retrieval.py`.
-MIN_SCORE = float(os.getenv("MIN_SCORE", "0.20"))  # drop chunks below this similarity
+# 0.45 measured on data/eval/golden.json with hybrid scoring: on-topic top hits
+# score 0.45-0.95, off-topic ones stay near 0.20-0.35. Re-tune with
+# `python scripts/eval_retrieval.py`.
+MIN_SCORE = float(os.getenv("MIN_SCORE", "0.45"))  # drop chunks below this hybrid score
+# Dense embeddings handle paraphrase but under-score short keyword queries. A
+# literal term-overlap bonus recovers them without a second index.
+LEXICAL_WEIGHT = float(os.getenv("LEXICAL_WEIGHT", "0.35"))
 HISTORY_TURNS = int(os.getenv("HISTORY_TURNS", "6"))  # prior messages used as context
 
 # --- Server protection ---

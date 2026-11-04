@@ -23,6 +23,38 @@ def _context_block(text: str, index: int, meta: dict) -> str:
     return f"[{index}] ({src}{page_s})\n{text}"
 
 
+_WORD = re.compile(r"[a-z0-9]+")
+
+# Deliberately small: only words that carry no retrieval signal. Keeping this
+# list short avoids discarding meaningful nouns like "internal" or "marks".
+_STOPWORDS = frozenset(
+    {
+        "a", "an", "and", "are", "at", "be", "by", "can", "do", "does", "for",
+        "from", "how", "i", "in", "is", "it", "of", "on", "or", "that", "the",
+        "their", "there", "these", "this", "to", "was", "what", "when", "where",
+        "which", "who", "why", "will", "with", "you", "your",
+    }
+)
+
+
+def _content_terms(text: str) -> set[str]:
+    return {w for w in _WORD.findall(text.lower()) if w not in _STOPWORDS and len(w) > 1}
+
+
+def lexical_overlap(question: str, document: str) -> float:
+    """Fraction of the question's content words that appear in the chunk.
+
+    Dense retrieval handles paraphrase well but under-scores short queries that
+    share exact wording with a document heading ("internal marks split" vs
+    "INTERNAL MARKS STRUCTURE"). This cheap signal is blended into ranking and
+    needs no extra index or dependency.
+    """
+    q = _content_terms(question)
+    if not q:
+        return 0.0
+    return len(q & _content_terms(document)) / len(q)
+
+
 # Words that usually mean "same as the previous question" — a bare follow-up
 # such as "when is it?" retrieves nothing useful on its own.
 _FOLLOWUP_RE = re.compile(
@@ -96,6 +128,12 @@ def retrieve(question: str, history: list[dict] | None = None) -> list[dict]:
         return []
 
     toks = [set(d.lower().split()) for d in docs]
+    # Blend dense similarity with literal term coverage once, up front: it does
+    # not depend on which chunks have already been selected by MMR.
+    lexical = [lexical_overlap(query, d) for d in docs]
+    hybrid = [
+        (1 - dists[i]) + config.LEXICAL_WEIGHT * lexical[i] for i in range(n)
+    ]
 
     def jaccard(a: set[str], b: set[str]) -> float:
         union = a | b
@@ -110,7 +148,7 @@ def retrieve(question: str, history: list[dict] | None = None) -> list[dict]:
             redundancy = max(
                 (jaccard(toks[i], toks[j]) for j in selected), default=0.0
             )
-            score = (1 - dists[i]) - 0.3 * redundancy
+            score = hybrid[i] - 0.3 * redundancy
             if score > best_score:
                 best_i, best_score = i, score
         if best_i is None:
@@ -119,7 +157,7 @@ def retrieve(question: str, history: list[dict] | None = None) -> list[dict]:
 
     hits = []
     for i in selected:
-        score = round(1 - dists[i], 4)
+        score = round(hybrid[i], 4)
         if score < config.MIN_SCORE:
             continue
         if len(hits) >= config.TOP_K:
@@ -130,6 +168,7 @@ def retrieve(question: str, history: list[dict] | None = None) -> list[dict]:
             "text": docs[i],
             "metadata": metas[i],
             "score": score,
+            "cosine": round(1 - dists[i], 4),
         })
     return hits
 

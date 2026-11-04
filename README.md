@@ -7,7 +7,12 @@ passages that were retrieved for that question.
 
 This is Flagship Project #1 on the portfolio roadmap (the "Currently Building" card).
 
+![Demo: asking "When is the mid-semester break?" and streaming a cited answer](docs/demo.gif)
+
 **Stack:** FastAPI · ChromaDB · sentence-transformers · plain-JS SSE frontend.
+
+**Read the case study:** [`docs/CASE_STUDY.md`](docs/CASE_STUDY.md) — architecture,
+the retrieval bug the eval caught, and the honest limitations.
 
 ## Three things worth knowing up front
 
@@ -21,6 +26,10 @@ This is Flagship Project #1 on the portfolio roadmap (the "Currently Building" c
   are expanded with the previous one before retrieval, and the model sees the exchange.
 - **It says "I don't know".** Chunks below `MIN_SCORE` are dropped, so an off-topic
   question reaches the honest not-found reply instead of loosely related context.
+- **Hybrid retrieval.** Cosine similarity is blended with a literal term-overlap bonus,
+  so a short keyword question ("internal marks split") is not lost below the cutoff.
+- **Measured, not guessed.** 10/10 source hits and 10/10 keyword recall on the golden
+  set; the eval runs in CI on every push.
 
 ## Try asking
 
@@ -37,6 +46,7 @@ data/docs/*.pdf|txt|md
         ▼
     ChromaDB  ──persistent vector store──
         │  question → embed → top 12 by cosine
+        │  hybrid score = cosine + 0.35 × lexical overlap
         │  MMR re-rank (λ=0.3) → top 4, de-duplicated
         ▼
    prompt: system rules + [1]..[4] excerpts + question
@@ -101,12 +111,14 @@ app/
   store.py      ChromaDB wrapper (metadata coercion, reset, counts)
   schemas.py    request/response models
 static/         index.html, app.js (SSE reader), styles.css
-tests/          test_api.py, test_chunking.py
-scripts/        eval_retrieval.py (hit-rate harness)
+tests/          test_api.py, test_chunking.py, test_retrieval.py
+scripts/        eval_retrieval.py (hit-rate harness), deploy_hf_space.py, record_demo.py
 data/docs/      source documents (txt/md/pdf) — samples included
 data/eval/      golden.json — questions scored by the harness
-Dockerfile      python:3.11-slim image, serves on 8123
-.github/        tests.yml — pytest on every push and PR to main
+docs/           case study, demo GIF and poster
+deploy/         Hugging Face Space metadata (app_port: 7860)
+Dockerfile      python:3.11-slim image, serves on $PORT (7860 by default)
+.github/        tests.yml — pytest + retrieval eval on every push and PR to main
 ```
 
 ## Configuration
@@ -124,7 +136,8 @@ Everything in `.env` is optional; defaults shown.
 | `CHUNK_OVERLAP` | `150` | characters shared by neighbouring chunks |
 | `TOP_K` | `4` | passages sent to the model |
 | `FETCH_K` | `12` | candidates fetched before MMR re-ranking |
-| `MIN_SCORE` | `0.20` | drop chunks below this similarity; measured on the golden set |
+| `MIN_SCORE` | `0.45` | drop chunks below this hybrid score; measured on the golden set |
+| `LEXICAL_WEIGHT` | `0.35` | weight of literal term overlap in the hybrid score |
 | `HISTORY_TURNS` | `6` | earlier messages kept as conversation context |
 | `ADMIN_TOKEN` | *(empty)* | when set, `/api/ingest` requires an `X-Admin-Token` header |
 | `RATE_LIMIT` | `20` | chat requests per IP per window (`0` disables) |
@@ -138,7 +151,7 @@ Everything in `.env` is optional; defaults shown.
 python -m pytest tests/ -v
 ```
 
-34 tests (~1.5s) covering chunking edge cases, PDF fallback, metadata coercion,
+45 tests (~1.5s) covering chunking edge cases, PDF fallback, metadata coercion,
 retrieval fallback, the `MIN_SCORE` cutoff, follow-up query expansion, rate limiting,
 the admin-token gate, and the full API surface via injected fakes.
 
@@ -146,24 +159,38 @@ the admin-token gate, and the full API surface via injected fakes.
 
 ```bash
 docker build -t campus-assistant .
-docker run --rm -p 8123:8123 campus-assistant
+docker run --rm -p 8123:8123 -e PORT=8123 campus-assistant
 ```
 
-`.dockerignore` keeps `.venv`, the vector store and logs out of the build context.
-`.github/workflows/tests.yml` runs the test suite on every push and pull request to
-`main`.
+The image serves on `$PORT` (7860 by default) so it can be deployed directly to
+Hugging Face Spaces. `.dockerignore` keeps `.venv`, the vector store and logs out
+of the build context. `.github/workflows/tests.yml` runs the test suite **and** the
+retrieval eval on every push and pull request to `main`.
+
+## Deploy a public demo
+
+```bash
+pip install huggingface_hub
+huggingface-cli login
+python scripts/deploy_hf_space.py --repo-id <user>/rag-campus-assistant --groq-key gsk_...
+```
+
+The script creates a Docker Space, uploads the app without local state or secrets,
+and sets `GROQ_API_KEY` as a Space secret. Omit `--groq-key` to deploy in
+retrieval-only mode.
 
 ## Retrieval evaluation
 
 ```bash
-python scripts/eval_retrieval.py            # exits non-zero below 80% hit-rate
+python scripts/eval_retrieval.py            # exits non-zero below 90%
 python scripts/eval_retrieval.py --verbose  # show every retrieved chunk
 ```
 
 Runs the real retrieval path over `data/eval/golden.json` and reports source hit-rate
-and keyword recall. Current baseline on the sample corpus: **11/11 (100%)**, which is
-what the `MIN_SCORE=0.20` default is tuned against — on-topic top hits scored 0.24–0.68,
-off-topic ones 0.06–0.20. Add your own cases as the corpus grows.
+and keyword recall. Current baseline on the sample corpus: **10/10 source hits and
+10/10 keyword recall**, which is what the `MIN_SCORE=0.45` default is tuned against.
+On-topic top hits score 0.45–0.95; off-topic ones stay near 0.20–0.35. Add your own
+cases as the corpus grows.
 
 ## Why these design choices
 
@@ -176,6 +203,11 @@ Short answers for the "why did you build it that way" question in an interview.
 - **MMR instead of plain top-k.** Cosine top-k happily returns four near-identical
   chunks when one rule appears on several pages. Greedy MMR with a λ=0.3 Jaccard
   redundancy penalty diversifies the context.
+- **Hybrid scoring, because the eval caught a bug.** "What is the internal marks
+  split?" scored 0.297 against the chunk headed `INTERNAL MARKS STRUCTURE` and was
+  dropped by the cutoff. Lowering the threshold would have admitted off-topic noise,
+  so the ranker now adds a 0.35 × literal-term-overlap bonus. Same chunk: 0.531.
+  Raw cosine is still reported alongside the hybrid score.
 - **Page numbers stored as strings.** ChromaDB only accepts scalar metadata, and a
   `None` page from a label-less PDF would crash ingestion. Values are coerced on write
   and restored to `int | None` on read.
@@ -186,7 +218,10 @@ Short answers for the "why did you build it that way" question in an interview.
 
 - [x] Evaluation harness: golden Q/A set + retrieval hit-rate scoring
 - [x] Conversational memory (follow-up questions)
-- [ ] Demo GIF for the portfolio's "Currently Building" card
+- [x] Demo GIF for the portfolio card (`docs/demo.gif`)
+- [x] Hybrid lexical scoring (10/10 on the golden set)
+- [ ] Hosted public demo (`scripts/deploy_hf_space.py` is ready)
+- [ ] Cross-encoder reranker, measured against the current baseline
 
 ## License
 

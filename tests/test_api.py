@@ -267,6 +267,35 @@ class TestGlyphTidy:
         assert tokens == "IA-1 ends"
 
 
+class TestStreamSanitising:
+    def test_footnote_citation_split_across_tokens_is_normalized(self, fake_retrieval, monkeypatch):
+        # A real model streams "[1", "†L9-L12]" as separate tokens.
+        chunks = ["The break is Sep 24 [1", "†L9-L12]", " and classes resume Oct 2."]
+        monkeypatch.setattr(llm, "stream_answer", lambda q, hits, history=None: iter(chunks))
+        with client.stream("POST", "/api/chat", json={"question": "when is the break?"}) as r:
+            lines = [l for l in r.iter_lines() if l.startswith("data:")]
+        frames = [json.loads(l[5:]) for l in lines]
+        tokens = "".join(f["t"] for f in frames if f["type"] == "token")
+        assert "[1†" not in tokens
+        assert tokens == "The break is Sep 24 [1] and classes resume Oct 2."
+
+    def test_markdown_emphasis_is_not_shown_literally(self, fake_retrieval, monkeypatch):
+        monkeypatch.setattr(llm, "stream_answer", lambda q, hits, history=None: iter(["**Sep 24**"]))
+        with client.stream("POST", "/api/chat", json={"question": "when is the break?"}) as r:
+            lines = [l for l in r.iter_lines() if l.startswith("data:")]
+        frames = [json.loads(l[5:]) for l in lines]
+        tokens = "".join(f["t"] for f in frames if f["type"] == "token")
+        assert tokens == "Sep 24"
+
+    def test_unclosed_bracket_is_flushed_at_end(self, fake_retrieval, monkeypatch):
+        monkeypatch.setattr(llm, "stream_answer", lambda q, hits, history=None: iter(["see note [", "unfinished"]))
+        with client.stream("POST", "/api/chat", json={"question": "hi"}) as r:
+            lines = [l for l in r.iter_lines() if l.startswith("data:")]
+        frames = [json.loads(l[5:]) for l in lines]
+        tokens = "".join(f["t"] for f in frames if f["type"] == "token")
+        assert tokens == "see note [unfinished"
+
+
 class TestHealth:
     def test_health_shape(self):
         r = client.get("/api/health")

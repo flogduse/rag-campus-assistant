@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -33,9 +34,33 @@ _GLYPH_FIXES = str.maketrans({
 })
 
 
+_FOOTNOTE_CITE = re.compile(r"[【\[]\s*(\d+)\s*†[^】\]]*[】\]]")
+_OPENERS = ("[", "【")
+
+
 def _tidy(text: str) -> str:
-    """Replace unrenderable typographic characters with ASCII equivalents."""
-    return text.translate(_GLYPH_FIXES)
+    """Normalise typographic characters and citation/markdown artefacts."""
+    text = text.translate(_GLYPH_FIXES)
+    # The chat bubble renders plain text, so markdown emphasis would appear as
+    # literal asterisks. Strip the markers rather than shipping a parser.
+    text = text.replace("**", "").replace("__", "")
+    return _FOOTNOTE_CITE.sub(lambda m: f"[{m.group(1)}]", text)
+
+
+def _split_safe(text: str) -> tuple[str, str]:
+    """Split streamed text so a citation is never cleaned up mid-token.
+
+    Models emit footnote citations like ``[1†L9-L12]`` one token at a time, so
+    ``_tidy`` on a single token cannot see the closing bracket. Hold back from
+    the last unmatched ``[`` and re-run the regex once it completes.
+    """
+    start = max(text.rfind(o) for o in _OPENERS)
+    if start == -1:
+        return text, ""
+    tail = text[start:]
+    if "]" in tail or "】" in tail:
+        return text, ""
+    return text[:start], tail
 
 
 # --- abuse protection -------------------------------------------------------
@@ -117,6 +142,7 @@ def chat(body: ChatRequest) -> StreamingResponse:
             # Stored as "" when unknown; the contract says int | None.
             "page": h["metadata"].get("page") or None,
             "score": h["score"],
+            "cosine": h.get("cosine"),
             "text": _tidy(h["text"]),
         }
         for h in hits
@@ -130,8 +156,15 @@ def chat(body: ChatRequest) -> StreamingResponse:
             yield f"data: {json.dumps({'type': 'token', 't': 'I could not find anything about that in the ingested documents. Try adding more files to data/docs and re-ingesting.'})}\n\n"
         else:
             try:
+                pending = ""
                 for token in llm.stream_answer(body.question, hits, history):
-                    yield f"data: {json.dumps({'type': 'token', 't': _tidy(token)})}\n\n"
+                    if not token:
+                        continue
+                    safe, pending = _split_safe(pending + str(token))
+                    if safe:
+                        yield f"data: {json.dumps({'type': 'token', 't': _tidy(safe)})}\n\n"
+                if pending:
+                    yield f"data: {json.dumps({'type': 'token', 't': _tidy(pending)})}\n\n"
             except Exception as exc:
                 yield f"data: {json.dumps({'type': 'token', 't': f'[stream error: {exc}]'})}\n\n"
 
