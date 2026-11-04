@@ -8,6 +8,7 @@ the raw passages so you can verify the RAG core before wiring a key.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 
 import requests
@@ -22,41 +23,69 @@ def _context_block(text: str, index: int, meta: dict) -> str:
     return f"[{index}] ({src}{page_s})\n{text}"
 
 
+# Words that usually mean "same as the previous question" — a bare follow-up
+# such as "when is it?" retrieves nothing useful on its own.
+_FOLLOWUP_RE = re.compile(
+    r"\b(it|its|it's|that|this|those|these|they|them|there|same|again)\b", re.I
+)
+
+
+def format_history(history: list[dict] | None, limit: int) -> str:
+    """Render the last `limit` turns as a conversation block (may be empty)."""
+    if not history:
+        return ""
+    recent = history[-limit:]
+    lines = [f"{t['role'].upper()}: {t['content']}" for t in recent]
+    return "Earlier conversation (context only — not a source to cite):\n" + "\n".join(lines) + "\n\n"
+
+
+def retrieval_query(question: str, history: list[dict] | None) -> str:
+    """Expand short/pronoun follow-ups with the previous user question.
+
+    Embedding "when is it?" alone lands nowhere; prefixing the prior question
+    keeps the lookup anchored without needing an extra LLM round-trip.
+    """
+    if not history:
+        return question
+    last_user = next(
+        (t["content"] for t in reversed(history) if t["role"] == "user"), ""
+    )
+    if not last_user or last_user == question:
+        return question
+    words = question.split()
+    if len(words) <= 6 or _FOLLOWUP_RE.search(question):
+        return f"{last_user} {question}"
+    return question
+
+
 def build_prompt(question: str, hits: list[dict], history: list[dict] | None = None) -> str:
     blocks = "\n\n".join(
         _context_block(h["text"], i + 1, h["metadata"]) for i, h in enumerate(hits)
     )
-    history_text = ""
-    if history:
-        parts = []
-        for turn in history[-6:]:  # keep last few turns
-            role = turn.get("role", "user")
-            content = turn.get("content", "").strip()
-            if not content:
-                continue
-            parts.append(f"{role.upper()}: {content}")
-        if parts:
-            history_text = "Conversation history:\n" + "\n".join(parts) + "\n\n---\n\n"
+    convo = format_history(history, config.HISTORY_TURNS)
     return (
-        f"{history_text}"
-        f"Context:\n{blocks}\n\n---\n\n"
+        f"{convo}Context:\n{blocks}\n\n---\n\n"
         f"Question: {question}\n\n"
         "Answer using only the context above. Cite sources as [1], [2]. "
         "If the context is insufficient, say so honestly."
     )
 
 
-def retrieve(question: str) -> list[dict]:
+def retrieve(question: str, history: list[dict] | None = None) -> list[dict]:
     """Embed the query, fetch FETCH_K candidates, then greedy-MMR down to TOP_K.
 
     MMR (maximal marginal relevance) keeps results relevant *and* diverse:
     score = query similarity - lambda * redundancy with already-picked chunks.
     Redundancy uses a cheap Jaccard overlap on word sets — no re-encoding.
-    Drop hits below MIN_SCORE to avoid feeding irrelevant context.
+
+    Hits below config.MIN_SCORE are discarded: an off-topic question should
+    reach the "I could not find that" path instead of feeding the model four
+    loosely related chunks it would then try to answer from.
     """
     from .ingest import get_model
 
-    vec = get_model().encode([question], normalize_embeddings=True)[0].tolist()
+    query = retrieval_query(question, history)
+    vec = get_model().encode([query], normalize_embeddings=True)[0].tolist()
     raw = store.query("", vec, config.FETCH_K)
 
     docs = raw.get("documents", [[]])[0]
@@ -89,26 +118,23 @@ def retrieve(question: str) -> list[dict]:
         selected.append(best_i)
 
     hits = []
-    for rank, i in enumerate(selected, start=1):
-        sim = round(1 - dists[i], 4)
-        if sim < config.MIN_SCORE:
-            continue  # drop irrelevant chunks
+    for i in selected:
+        score = round(1 - dists[i], 4)
+        if score < config.MIN_SCORE:
+            continue
+        if len(hits) >= config.TOP_K:
+            break
+        # Re-number so citation markers stay contiguous after filtering.
         hits.append({
             "index": len(hits) + 1,
             "text": docs[i],
             "metadata": metas[i],
-            "score": sim,
+            "score": score,
         })
-        if len(hits) >= config.TOP_K:
-            break
     return hits
 
 
 def _sse_stream(resp: requests.Response) -> Iterator[str]:
-    # Force UTF-8. requests falls back to ISO-8859-1 when an SSE response has no
-    # charset parameter, which turns multi-byte characters into mojibake
-    # (a narrow no-break space renders as "a€¯").
-    resp.encoding = "utf-8"
     for line in resp.iter_lines(decode_unicode=True):
         if not line or not line.startswith("data:"):
             continue
@@ -180,7 +206,6 @@ def stream_ollama(prompt: str) -> Iterator[str]:
         timeout=180,
     )
     r.raise_for_status()
-    r.encoding = "utf-8"  # same ISO-8859-1 default applies to NDJSON
     for line in r.iter_lines(decode_unicode=True):
         if not line:
             continue
@@ -191,9 +216,11 @@ def stream_ollama(prompt: str) -> Iterator[str]:
             break
 
 
-def stream_answer(question: str, hits: list[dict]) -> Iterator[str]:
+def stream_answer(
+    question: str, hits: list[dict], history: list[dict] | None = None
+) -> Iterator[str]:
     provider, _model = config.get_provider()
-    prompt = build_prompt(question, hits)
+    prompt = build_prompt(question, hits, history)
     if provider == "groq":
         return stream_groq(prompt)
     if provider == "openai":

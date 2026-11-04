@@ -1,17 +1,15 @@
 """FastAPI application: chat (streaming), health, re-ingest, static UI."""
 from __future__ import annotations
 
+import hmac
 import json
+import threading
+import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-
-from fastapi import Header, Request
-from collections import defaultdict
-import time
-import logging
 
 from . import config, ingest, llm, store
 from .schemas import ChatRequest, HealthResponse
@@ -20,11 +18,9 @@ app = FastAPI(title="RAG Campus Assistant", version="1.0.0")
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
-logger = logging.getLogger("rag-campus-assistant")
-
-# Models emit typographic Unicode that many UI fonts have no glyph for, so
-# "IA‑1" (U+2011) and "7:30 AM" (U+202F) render as tofu boxes in the browser.
-# Normalise at the wire boundary: the UI should never have to care.
+# Models emit typographic Unicode that many UI fonts have no glyph for — "IA‑1"
+# (U+2011 non-breaking hyphen) or "7:30 AM" (U+202F narrow no-break space) show
+# up as tofu boxes. Normalise at the wire boundary so the UI never has to care.
 _GLYPH_FIXES = str.maketrans({
     "\u2010": "-",   # hyphen
     "\u2011": "-",   # non-breaking hyphen
@@ -36,26 +32,53 @@ _GLYPH_FIXES = str.maketrans({
     "\u202f": " ",   # narrow no-break space
 })
 
-# Simple in-memory rate limiting for /api/chat
-_chat_rate = defaultdict(list)
-_CHAT_WINDOW = 60  # seconds
-_CHAT_MAX = 30  # requests per window
-
-
-def _check_rate_limit(ip: str) -> None:
-    now = time.time()
-    bucket = _chat_rate[ip]
-    # prune
-    while bucket and now - bucket[0] > _CHAT_WINDOW:
-        bucket.pop(0)
-    if len(bucket) >= _CHAT_MAX:
-        raise HTTPException(status_code=429, detail="Rate limit exceeded. Try again later.")
-    bucket.append(now)
-
 
 def _tidy(text: str) -> str:
     """Replace unrenderable typographic characters with ASCII equivalents."""
     return text.translate(_GLYPH_FIXES)
+
+
+# --- abuse protection -------------------------------------------------------
+# A public demo spends someone's Groq quota per question and re-embeds the whole
+# corpus on ingest, so both endpoints get a cheap in-memory guard. No Redis, no
+# dependency: a dict of timestamps per client IP is enough for a single process.
+_rate_lock = threading.Lock()
+_rate_buckets: dict[str, list[float]] = {}
+
+
+def rate_limit(request: Request) -> None:
+    """Allow at most RATE_LIMIT chat requests per RATE_WINDOW seconds per IP."""
+    if config.RATE_LIMIT <= 0:
+        return
+    client = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    with _rate_lock:
+        hits = [t for t in _rate_buckets.get(client, []) if now - t < config.RATE_WINDOW]
+        if len(hits) >= config.RATE_LIMIT:
+            retry_after = max(1, int(config.RATE_WINDOW - (now - hits[0])))
+            raise HTTPException(
+                status_code=429,
+                detail="Too many questions — please wait a moment and try again.",
+                headers={"Retry-After": str(retry_after)},
+            )
+        hits.append(now)
+        _rate_buckets[client] = hits
+        # Bound memory if many distinct clients appear.
+        if len(_rate_buckets) > 10_000:
+            for key in [k for k, v in _rate_buckets.items() if not v]:
+                _rate_buckets.pop(key, None)
+
+
+def require_admin(x_admin_token: str | None = Header(default=None)) -> None:
+    """Gate /api/ingest when ADMIN_TOKEN is configured.
+
+    Unset token = local development default (open). Set one before deploying:
+    an open ingest endpoint lets anyone wipe the index and burn CPU re-embedding.
+    """
+    if not config.ADMIN_TOKEN:
+        return
+    if not hmac.compare_digest(x_admin_token or "", config.ADMIN_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Admin-Token")
 
 
 @app.get("/api/health", response_model=HealthResponse)
@@ -70,8 +93,8 @@ def health() -> HealthResponse:
     )
 
 
-@app.post("/api/chat")
-def chat(body: ChatRequest, request: Request = None) -> StreamingResponse:
+@app.post("/api/chat", dependencies=[Depends(rate_limit)])
+def chat(body: ChatRequest) -> StreamingResponse:
     """Server-Sent Events stream: sources first, then answer tokens, then done.
 
     Event protocol (one JSON object per `data:` line):
@@ -79,28 +102,9 @@ def chat(body: ChatRequest, request: Request = None) -> StreamingResponse:
       {"type": "token",   "t": "..."}
       {"type": "done"}
     """
-    if request is not None:
-        try:
-            ip = request.client.host if request.client else "unknown"
-        except Exception:
-            ip = "unknown"
-        try:
-            _check_rate_limit(ip)
-        except HTTPException:
-            raise
-        except Exception:
-            pass
-
+    history = [turn.model_dump() for turn in body.history]
     try:
-        # Optionally incorporate history for retrieval query rewriting
-        query = body.question
-        if getattr(body, "history", None):
-            recent = []
-            for turn in body.history[-4:]:
-                recent.append(f"{turn.role}: {turn.content}")
-            if recent:
-                query = "\n".join(recent) + "\nuser: " + body.question
-        hits = llm.retrieve(query)
+        hits = llm.retrieve(body.question, history)
     except Exception as exc:  # store/model errors surface as 500 with detail
         raise HTTPException(status_code=500, detail=f"Retrieval failed: {exc}") from exc
 
@@ -110,9 +114,10 @@ def chat(body: ChatRequest, request: Request = None) -> StreamingResponse:
         {
             "index": h["index"],
             "source": h["metadata"].get("source", "unknown"),
-            "page": h["metadata"].get("page"),
+            # Stored as "" when unknown; the contract says int | None.
+            "page": h["metadata"].get("page") or None,
             "score": h["score"],
-            "text": h["text"],
+            "text": _tidy(h["text"]),
         }
         for h in hits
     ]
@@ -125,36 +130,8 @@ def chat(body: ChatRequest, request: Request = None) -> StreamingResponse:
             yield f"data: {json.dumps({'type': 'token', 't': 'I could not find anything about that in the ingested documents. Try adding more files to data/docs and re-ingesting.'})}\n\n"
         else:
             try:
-                history_dicts = [t.model_dump() for t in getattr(body, "history", [])] if getattr(body, "history", None) else None
-                # Try to use llm.stream_answer first for compatibility with tests
-                try:
-                    stream = llm.stream_answer(body.question, hits)
-                    for token in stream:
-                        yield f"data: {json.dumps({'type': 'token', 't': _tidy(token)})}\n\n"
-                except Exception as exc:
-                    # If it's the specific error from patched stream_answer in tests, yield it as stream error
-                    if hasattr(llm.stream_answer, '__name__') and 'boom' in str(llm.stream_answer):
-                        yield f"data: {json.dumps({'type': 'token', 't': f'[stream error: {exc}]'})}\n\n"
-                    elif str(exc) == "provider down":
-                        yield f"data: {json.dumps({'type': 'token', 't': f'[stream error: {exc}]'})}\n\n"
-                    else:
-                        try:
-                            prompt = llm.build_prompt(body.question, hits, history=history_dicts)
-                            provider, _model = config.get_provider()
-                            if provider == "groq":
-                                for token in llm.stream_groq(prompt):
-                                    yield f"data: {json.dumps({'type': 'token', 't': _tidy(token)})}\n\n"
-                            elif provider == "openai":
-                                for token in llm.stream_openai(prompt):
-                                    yield f"data: {json.dumps({'type': 'token', 't': _tidy(token)})}\n\n"
-                            elif provider == "ollama":
-                                for token in llm.stream_ollama(prompt):
-                                    yield f"data: {json.dumps({'type': 'token', 't': _tidy(token)})}\n\n"
-                            else:
-                                joined = "\n\n".join(f"[{h['index']}] {h['text'][:300]}..." for h in hits)
-                                yield f"data: {json.dumps({'type': 'token', 't': _tidy('(No LLM provider configured — showing retrieved passages.)\n\n' + joined)})}\n\n"
-                        except Exception as exc2:
-                            yield f"data: {json.dumps({'type': 'token', 't': f'[stream error: {exc2}]'})}\n\n"
+                for token in llm.stream_answer(body.question, hits, history):
+                    yield f"data: {json.dumps({'type': 'token', 't': _tidy(token)})}\n\n"
             except Exception as exc:
                 yield f"data: {json.dumps({'type': 'token', 't': f'[stream error: {exc}]'})}\n\n"
 
@@ -167,17 +144,13 @@ def chat(body: ChatRequest, request: Request = None) -> StreamingResponse:
     )
 
 
-@app.post("/api/ingest")
-def reingest(x_admin_token: str | None = Header(default=None, alias="X-Admin-Token")) -> dict:
-    """Drop the vector store and re-ingest everything in data/docs. Requires ADMIN_TOKEN if set."""
-    if config.ADMIN_TOKEN:
-        if not x_admin_token or x_admin_token != config.ADMIN_TOKEN:
-            raise HTTPException(status_code=401, detail="Unauthorized")
+@app.post("/api/ingest", dependencies=[Depends(require_admin)])
+def reingest() -> dict:
+    """Drop the vector store and re-ingest everything in data/docs."""
     try:
         store.reset()
         added = ingest.ingest_all()
     except Exception as exc:
-        logger.exception("Ingest failed")
         raise HTTPException(status_code=500, detail=f"Ingest failed: {exc}") from exc
     return {"status": "ok", "chunks": added, "total": store.count()}
 

@@ -1,9 +1,10 @@
-/* Campus Assistant frontend: SSE chat with sources + citations + memory + stop. */
+/* Campus Assistant frontend: SSE chat with sources + citations. */
 const log = document.getElementById('log');
 const empty = document.getElementById('empty');
 const form = document.getElementById('composer');
 const input = document.getElementById('q');
 const askBtn = form.querySelector('.ask');
+const stopBtn = document.getElementById('stop');
 const pill = document.getElementById('provider-pill');
 
 const EXAMPLES = [
@@ -13,8 +14,12 @@ const EXAMPLES = [
   'What does the attendance policy say?',
 ];
 
+// Prior turns, sent with each question so follow-ups like "when is it?" work.
+// Trimmed on the server too (HISTORY_TURNS); this cap just keeps payloads small.
+const MAX_HISTORY = 6;
 const history = [];
-let controller = null;
+
+let activeController = null;
 
 function initExamples() {
   const wrap = document.getElementById('examples');
@@ -46,37 +51,35 @@ function addMessage(role, text = '') {
   return bubble;
 }
 
-function renderSources(container, sources) {
+function renderSources(wrap, sources) {
   const box = document.createElement('div');
   box.className = 'sources';
+  const detail = document.createElement('div');
+  detail.className = 'src-detail';
+  detail.hidden = true;
+
   sources.forEach((s, i) => {
     const chip = document.createElement('button');
     chip.type = 'button';
     chip.className = 'src';
-    chip.dataset.idx = i + 1;
     chip.textContent = `[${i + 1}] ${s.source}${s.page ? ` p.${s.page}` : ''}`;
-    const detail = document.createElement('div');
-    detail.className = 'src-detail';
-    detail.textContent = s.text + `\n\n(score: ${s.score})`;
-    chip.addEventListener('click', (e) => {
-      e.stopPropagation();
-      // toggle detail panel for mobile/touch
-      const open = chip.classList.contains('active');
-      box.querySelectorAll('.src').forEach((el) => {
-        el.classList.remove('active');
-      });
-      box.querySelectorAll('.src-detail').forEach((el) => {
-        el.classList.remove('open');
-      });
-      if (!open) {
-        chip.classList.add('active');
-        detail.classList.add('open');
+    chip.addEventListener('click', () => {
+      const wasActive = chip.classList.contains('active');
+      box.querySelectorAll('.src').forEach((el) => el.classList.remove('active'));
+      if (wasActive) {
+        detail.hidden = true;
+        return;
       }
+      chip.classList.add('active');
+      const where = `${s.source}${s.page ? ` · page ${s.page}` : ''}`;
+      detail.textContent = `${where} · score ${s.score}\n\n${s.text}`;
+      detail.hidden = false;
+      scrollBottom();
     });
     box.appendChild(chip);
-    box.appendChild(detail);
   });
-  container.appendChild(box);
+
+  wrap.append(box, detail);
   scrollBottom();
 }
 
@@ -87,43 +90,34 @@ function setPill(provider, model) {
   pill.className = `pill ${provider}`;
 }
 
-function makeStopButton() {
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'ask';
-  btn.textContent = 'STOP ■';
-  btn.addEventListener('click', () => {
-    if (controller) {
-      controller.abort();
-    }
-  });
-  return btn;
+function setStreaming(on) {
+  askBtn.disabled = on;
+  stopBtn.hidden = !on;
+  if (!on) activeController = null;
 }
 
 async function ask(question) {
   if (!question.trim()) return;
-  if (controller) {
-    controller.abort();
-  }
   if (!empty.hidden) empty.hidden = true;
 
-  const userMsg = question;
-  addMessage('user', userMsg);
+  const prompt = question.trim();
+  addMessage('user', prompt);
   const bubble = addMessage('bot');
-  askBtn.disabled = true;
   input.value = '';
   input.focus();
 
-  // swap button to stop
-  const stopBtn = makeStopButton();
-  form.replaceChild(stopBtn, askBtn);
+  const controller = new AbortController();
+  activeController = controller;
+  setStreaming(true);
 
-  controller = new AbortController();
+  const payload = { question: prompt, history: history.slice(-MAX_HISTORY) };
+  let stopped = false;
+
   try {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: userMsg, history }),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
@@ -131,7 +125,6 @@ async function ask(question) {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = '';
-    let sourcesBox = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -157,26 +150,35 @@ async function ask(question) {
         }
       }
     }
-    history.push({ role: 'user', content: userMsg });
-    history.push({ role: 'assistant', content: bubble.textContent });
-    if (history.length > 12) history.splice(0, history.length - 12);
   } catch (err) {
     if (err.name === 'AbortError') {
-      bubble.textContent += '\n[stopped]';
+      stopped = true;
+      bubble.textContent += bubble.textContent ? '\n\n[stopped]' : '[stopped]';
     } else {
       bubble.textContent += `\n[connection error: ${err.message}]`;
     }
   } finally {
     bubble.classList.remove('typing');
-    form.replaceChild(askBtn, stopBtn);
-    askBtn.disabled = false;
-    controller = null;
+    setStreaming(false);
+  }
+
+  // Remember the exchange so the next question has context.
+  const answer = bubble.textContent.trim();
+  if (answer && !stopped) {
+    history.push({ role: 'user', content: prompt });
+    history.push({ role: 'assistant', content: answer.slice(0, 4000) });
+    while (history.length > MAX_HISTORY) history.shift();
   }
 }
 
 form.addEventListener('submit', (e) => {
   e.preventDefault();
+  if (activeController) return; // one question at a time
   ask(input.value);
+});
+
+stopBtn.addEventListener('click', () => {
+  if (activeController) activeController.abort();
 });
 
 (async () => {

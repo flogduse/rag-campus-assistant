@@ -1,0 +1,60 @@
+{
+  "_comment": "Golden retrieval set: each question must retrieve its expected document, and the top hits should contain at least one keyword. Edit freely — the runner reads this file.",
+  "cases": [
+    {
+      "question": "When does the mid-semester break begin?",
+      "source": "academic-calendar.txt",
+      "keywords": ["september 24", "sep 24"]
+    },
+    {
+      "question": "How is the 50-mark internal component split?",
+      "source": "academic-calendar.txt",
+      "keywords": ["ia-1", "capstone"]
+    },
+    {
+      "question": "What is the late registration fee?",
+      "source": "academic-calendar.txt",
+      "keywords": ["500"]
+    },
+    {
+      "question": "When do the end-semester examinations start?",
+      "source": "academic-calendar.txt",
+      "keywords": ["november 09", "nov 09"]
+    },
+    {
+      "question": "How many marks does the first internal assessment carry?",
+      "source": "academic-calendar.txt",
+      "keywords": ["ia-1", "10"]
+    },
+    {
+      "question": "What is the prize pool for the tech fest hackathon?",
+      "source": "clubs-and-fests.txt",
+      "keywords": ["50,000", "pravyom"]
+    },
+    {
+      "question": "When does the Coding Club meet?",
+      "source": "clubs-and-fests.txt",
+      "keywords": ["fridays"]
+    },
+    {
+      "question": "What are the mess timings for dinner?",
+      "source": "hostel-rules.txt",
+      "keywords": ["7:30 pm"]
+    },
+    {
+      "question": "Can parents visit on a weekday?",
+      "source": "hostel-rules.txt",
+      "keywords": ["sundays"]
+    },
+    {
+      "question": "How much notice is needed for overnight leave?",
+      "source": "hostel-rules.txt",
+      "keywords": ["48 hours"]
+    },
+    {
+      "question": "Is port 25 blocked on the hostel network?",
+      "source": "hostel-rules.txt",
+      "keywords": ["port 25"]
+    }
+  ]
+}

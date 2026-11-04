@@ -7,12 +7,14 @@ int|None when read back.
 """
 from __future__ import annotations
 
-from pathlib import Path
+import logging
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 
 from . import config
+
+log = logging.getLogger(__name__)
 
 _client = None
 _collection = None
@@ -54,10 +56,7 @@ def add_chunks(chunks: list[dict], vectors: list[list[float]]) -> int:
     col = get_collection()
     if not chunks:
         return 0
-    # upsert, not add: re-running ingest must refresh chunks whose text changed.
-    # Chroma's add() silently ignores ids that already exist, which leaves stale
-    # content in the store after an edit to the source document.
-    col.upsert(
+    col.add(
         ids=[c["id"] for c in chunks],
         documents=[c["text"] for c in chunks],
         metadatas=[_clean_meta(c["metadata"]) for c in chunks],
@@ -75,29 +74,24 @@ def query(text: str, vector: list[float], k: int) -> dict:
     )
 
 
-import logging
-
-logger = logging.getLogger("rag-campus-assistant")
-
-
 def count() -> int:
     try:
         return get_collection().count()
-    except Exception:
-        logger.exception("Failed to count documents in store")
+    except Exception as exc:  # health must not 500 because the store is unreadable
+        log.warning("store.count() failed: %s", exc)
         return 0
 
 
 def reset() -> None:
-    """Delete every chunk (used on re-ingest)."""
-    try:
-        col = get_collection()
-        got = col.get(include=[])
-        if got and got.get("ids"):
-            col.delete(ids=got["ids"])
-    except Exception:
-        logger.exception("Failed to reset vector store")
-        raise
+    """Delete every chunk (used on re-ingest).
+
+    Errors propagate on purpose: a partially wiped store followed by an ingest
+    would leave duplicate IDs and mixed old/new chunks with no visible signal.
+    """
+    col = get_collection()
+    got = col.get(include=[])
+    if got and got.get("ids"):
+        col.delete(ids=got["ids"])
 
 
 def unique_docs() -> int:
@@ -106,7 +100,7 @@ def unique_docs() -> int:
         if col.count() == 0:
             return 0
         got = col.get(include=["metadatas"])
-        return len({(m.get("source") if m else "?") or "?" for m in got.get("metadatas", [])})
-    except Exception:
-        logger.exception("Failed to get unique docs count")
+        return len({m.get("source", "?") for m in got["metadatas"]})
+    except Exception as exc:
+        log.warning("store.unique_docs() failed: %s", exc)
         return 0
