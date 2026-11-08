@@ -7,7 +7,7 @@ rewrite: retrieval, MMR, SSE streaming and the static UI are all identical.
 Usage
 -----
     pip install huggingface_hub
-    huggingface-cli login                # or pass --token
+    hf auth login                        # or pass --token
 
     python scripts/deploy_hf_space.py \
         --repo-id flogduse/rag-campus-assistant \
