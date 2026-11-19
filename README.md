@@ -28,7 +28,7 @@ the retrieval bug the eval caught, and the honest limitations.
   question reaches the honest not-found reply instead of loosely related context.
 - **Hybrid retrieval.** Cosine similarity is blended with a literal term-overlap bonus,
   so a short keyword question ("internal marks split") is not lost below the cutoff.
-- **Measured, not guessed.** 10/10 source hits and 10/10 keyword recall on the golden
+- **Measured, not guessed.** 11/11 source hits and 11/11 keyword recall on the golden
   set; the eval runs in CI on every push.
 
 ## Try asking
@@ -167,6 +167,15 @@ Hugging Face Spaces. `.dockerignore` keeps `.venv`, the vector store and logs ou
 of the build context. `.github/workflows/tests.yml` runs the test suite **and** the
 retrieval eval on every push and pull request to `main`.
 
+### Scaling
+
+The Chroma collection and the rate limiter both live in process memory, so run a
+single worker — that is what `uvicorn app.main:app` and the Docker image do. With
+`--workers 2+` each worker would hold its own view of the store and its own
+request counters. To scale horizontally, point `store.py` at a Chroma server and
+move rate limiting to a shared backend such as Redis; the retrieval and LLM
+layers themselves keep no per-request state.
+
 ## Deploy a public demo
 
 ```bash
@@ -187,8 +196,8 @@ python scripts/eval_retrieval.py --verbose  # show every retrieved chunk
 ```
 
 Runs the real retrieval path over `data/eval/golden.json` and reports source hit-rate
-and keyword recall. Current baseline on the sample corpus: **10/10 source hits and
-10/10 keyword recall**, which is what the `MIN_SCORE=0.45` default is tuned against.
+and keyword recall. Current baseline on the sample corpus: **11/11 source hits and
+11/11 keyword recall**, which is what the `MIN_SCORE=0.45` default is tuned against.
 On-topic top hits score 0.45–0.95; off-topic ones stay near 0.20–0.35. Add your own
 cases as the corpus grows.
 
@@ -219,7 +228,7 @@ Short answers for the "why did you build it that way" question in an interview.
 - [x] Evaluation harness: golden Q/A set + retrieval hit-rate scoring
 - [x] Conversational memory (follow-up questions)
 - [x] Demo GIF for the portfolio card (`docs/demo.gif`)
-- [x] Hybrid lexical scoring (10/10 on the golden set)
+- [x] Hybrid lexical scoring (11/11 on the golden set)
 - [ ] Hosted public demo (`scripts/deploy_hf_space.py` is ready)
 - [ ] Cross-encoder reranker, measured against the current baseline
 
